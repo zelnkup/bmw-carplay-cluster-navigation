@@ -1,0 +1,15 @@
+carplay-6wa (Apple CarPlay turn-by-turn on the BMW 6WA cluster)
+Required Notice: Copyright 2026 carplay-6wa contributors
+
+Licensed under the PolyForm Noncommercial License 1.0.0 (see LICENSE), except where a file says otherwise.
+
+Included third-party parts
+--------------------------
+* bin/librghook.so and source/third_party/nbtevo-carplay-advanced/ (src/rghook.c, src/rgview.h, unmodified, upstream
+  commit 9a80636b5d8c6eee259105a5e9311b912935a9c7), PolyForm Noncommercial 1.0.0.
+  Required Notice: Copyright 2026 nbtevo-carplay-advanced contributors (https://github.com/st1ng/nbtevo-carplay-advanced)
+  Their LICENSE and NOTICE are kept in that folder.
+
+* The renderer's DSI binding, MOST framing and HUDTerminal layout (source/hud6wa_probe/hud6wa_probe.c) are restated from
+  NBT-AAD (Sq00ky/Supra-iDrive6-Android-Auto @ 9af2284), PolyForm Noncommercial 1.0.0.
+  Required Notice: Copyright (c) 2026 nanaisu - NBT-AAD (https://github.com/Sq00ky/Supra-iDrive6-Android-Auto)
