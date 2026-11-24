@@ -28,6 +28,12 @@ A wrapper replaces `/opt/conn/bin/carplay/mm-ipod` (the original is kept as `mm-
 the renderer **only for the CarPlay Wi-Fi instance**; Bluetooth runs stock. It first test-loads the hook in a throwaway
 process: if that fails, CarPlay runs exactly stock. No configuration files are changed.
 
+## Lane arrows
+At junctions where the map has lane data (mostly bigger roads), a row of small lane arrows appears under the maneuver
+picture. The lanes to take are **white** (cluster colour 4); the others are **dimmed** (cluster colour 2). Colour 2 was
+picked on a real 6WA against its black background: colour 3 (grey) was too dim to read, colour 5 is red. The 6WA has a
+fixed palette, so the colours are slot numbers, not brightness values.
+
 ## Install
 1. Copy the `carplay-6wa` folder to the root of the USB stick and plug it into the car.
 2. SSH to the head unit, find the stick (`ls /mnt`), then:
