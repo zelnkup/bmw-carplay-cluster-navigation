@@ -1,7 +1,8 @@
 # Vendored: st1ng/nbtevo-carplay-advanced — `librghook.so` source only
 
 - Upstream: https://github.com/st1ng/nbtevo-carplay-advanced @ `9a80636b5d8c6eee259105a5e9311b912935a9c7` (2026-11-18)
-- Files: `src/rghook.c`, `src/rgview.h`, `LICENSE`, `NOTICE` — byte-identical to upstream (do not edit; patch via build flags/env).
+- Files: `src/rghook.c`, `src/rgview.h`, `src/hudshapes.h`, `src/hudglyphs.h`, `LICENSE`, `NOTICE` — byte-identical to upstream
+  (do not edit; patch via build flags/env). `hudglyphs.h` is Mapbox's drawings (ISC, notice inside the file).
 - Licence: PolyForm Noncommercial 1.0.0 (personal, non-commercial use by the car's owner). Required Notice: see `NOTICE`.
 
 ## Why
@@ -20,3 +21,8 @@ tasks/CURRENT.md 2026-11-17) never triggers.
   point `RGHOOK_PPS` at RAM (`/dev/shmem`) — flash writes on that thread stalled mm-ipod on 2026-11-14.
 - Not in upstream's tested list: our build NBTevo_Y24073J. Upstream says other mm-ipod builds are "untested", not unsupported
   (no addresses used).
+
+## Review of hudshapes.h / hudglyphs.h (2026-11-19)
+Pure geometry: the only #include is hudglyphs.h (const data); no I/O, no system calls, no externs except memset/memcpy (ours,
+src/hud6wa_probe/rgi_mem.c). Integer maths, no variable divisions (their udiv). Used through src/hud6wa_probe/rgi_shape.cpp:
+shapeOf + addLanes + mergePieces + toBoxPoly. sha256 hudshapes.h ed384188…f62435, hudglyphs.h 094322d2…4f832b97.

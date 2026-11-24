@@ -22,7 +22,7 @@ Two small pieces, kept apart on purpose:
 | Piece | Where it runs | What it does |
 |---|---|---|
 | `librghook.so` (from [nbtevo-carplay-advanced](https://github.com/st1ng/nbtevo-carplay-advanced), unmodified) | inside the CarPlay Wi-Fi `mm-ipod` | tells the iPhone the car has a guidance display, asks for route guidance, decodes it, writes the current maneuver to a small file in RAM; also stops a buffer leak in the stock iPhone driver that otherwise hangs it after ~10–20 guidance messages |
-| `hud6wa_probe rg` (this project) | its own process | reads that file and draws arrow / street / distance on the 6WA over MOST (cluster handles 1–6 only) |
+| `hud6wa_probe rg` (this project) | its own process | reads that file and draws the maneuver (Mapbox-style pictures, roundabouts with their exit), the lanes to take, street and distance on the 6WA over MOST (cluster handles 1–6 only) |
 
 A wrapper replaces `/opt/conn/bin/carplay/mm-ipod` (the original is kept as `mm-ipod.real`). It adds the hook and starts
 the renderer **only for the CarPlay Wi-Fi instance**; Bluetooth runs stock. It first test-loads the hook in a throwaway
@@ -42,6 +42,20 @@ process: if that fails, CarPlay runs exactly stock. No configuration files are c
 - Disable without uninstalling (as root): `touch /opt/carplay-6wa/disable` (everything) or
   `touch /opt/carplay-6wa/disable_renderer` (no cluster drawing); delete the file to re-enable. Needs `mount -uw /fs/sda0`.
 
+## Tested versions
+The renderer prints what it runs on as its first line in `/tmp/carplay6wa.render.log`
+(`HU software: …, DSI library … B`). If it finds a different internal layout in BMW's DSI library it stops with
+`UNSUPPORTED HEAD-UNIT SOFTWARE` before sending anything. Please report your line (works or not) in an issue.
+
+| HU software (`nbt_version.txt`) | DSI library | Cluster | App | Result |
+|---|---|---|---|---|
+| NBTevo_Y24073J | 299684 B | 6WA (BMW F22) | Google Maps | works (Nov 2026) |
+
+## Other clusters
+The renderer first asks the cluster for its picture size and only draws on the 6WA family. On any other cluster it logs
+`UNSUPPORTED CLUSTER` in `/tmp/carplay6wa.render.log` and draws nothing (CarPlay is unaffected). 6WB owners: please open an
+issue with that log — support needs a tester.
+
 ## If no arrows appear
 Logs (RAM, reset at power-off): `/tmp/carplay6wa.rghook.log` (hook: identification patched / accepted / authenticated /
 StartRouteGuidanceUpdates injected), `/tmp/carplay6wa.routeguidance` (current route), `/tmp/carplay6wa.render.log`
@@ -50,6 +64,7 @@ uses the cluster.
 
 ## Credits and license
 - **st1ng / nbtevo-carplay-advanced** — `librghook.so` (iAP2 route guidance for the NBT Evo `mm-ipod`), included unmodified.
+- **Mapbox** (mapbox-navigation-ios, ISC) — the maneuver and lane drawings, via st1ng's `hudshapes.h`.
 - **nanaisu / NBT-AAD** (Sq00ky/Supra-iDrive6-Android-Auto) — DSI/MOST client and `HUDTerminal` layout, restated in the renderer.
 - **ftojke / BMW-iDrive6-CarPlay-HUD**, **mib2q-carplay-rgi**, **mib2high-carplay-rgi** — protocol findings that guided this work.
 - Licensed under the **PolyForm Noncommercial License 1.0.0** (`LICENSE`, `NOTICE`): free for personal, non-commercial use.

@@ -22,13 +22,17 @@ CFLAGS=(--target=armv7-unknown-none-eabi -march=armv7-a -mfloat-abi=softfp -mfpu
         -mno-unaligned-access -nostdlib -ffreestanding -fno-builtin -fno-exceptions -Os -fno-ident -Wall -Werror -ffile-prefix-map="$REPO"=.)
 clang "${CFLAGS[@]}" -c hud6wa_probe.c -o "$OUT/hud6wa_probe.o"
 clang "${CFLAGS[@]}" -c rgi_render.c -o "$OUT/rgi_render.o"
+clang "${CFLAGS[@]}" -c rgi_mem.c -o "$OUT/rgi_mem.o"
+# st1ng's Mapbox shapes (third_party, unedited C++): freestanding, no exceptions/RTTI/static guards/atexit; -w: third-party code
+clang++ "${CFLAGS[@]/-Werror/}" -w -std=c++17 -fno-exceptions -fno-rtti -fno-threadsafe-statics -fno-use-cxa-atexit \
+    -c rgi_shape.cpp -o "$OUT/rgi_shape.o"
 clang "${CFLAGS[@]}" -c "$START" -o "$OUT/start.o"
 printf '%s\n' $UNDEF > "$OUT/libc_needed.txt"
 ( cd "$NBT" && python3 -m tools.qnx_importlib.make_importlib --libc "$LIBC" \
     --symbols-file "$HERE/$OUT/libc_needed.txt" --out "$HERE/$OUT/importlib" >/dev/null )
 arm-none-eabi-ld -o "$OUT/hud6wa_probe" --dynamic-linker=/usr/lib/ldqnx.so.2 -e _start -Ttext-segment=0x100000 \
   -z now -z noexecstack -z max-page-size=0x1000 --build-id=none --no-allow-shlib-undefined \
-  -L"$OUT/importlib" "$OUT/start.o" "$OUT/hud6wa_probe.o" "$OUT/rgi_render.o" -l:libc.so.3
+  -L"$OUT/importlib" "$OUT/start.o" "$OUT/hud6wa_probe.o" "$OUT/rgi_render.o" "$OUT/rgi_shape.o" "$OUT/rgi_mem.o" -l:libc.so.3
 H="$OUT/hud6wa_probe"; fail() { echo "CHECK FAIL: $*"; exit 7; }
 arm-none-eabi-readelf -hW "$H" | grep -q "Type:.*EXEC"                    || fail "not ET_EXEC"
 arm-none-eabi-readelf -lW "$H" | grep -q "/usr/lib/ldqnx.so.2"            || fail "INTERP"

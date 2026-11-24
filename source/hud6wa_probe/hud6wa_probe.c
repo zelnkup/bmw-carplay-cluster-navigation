@@ -107,6 +107,7 @@ static volatile int g_stop, g_draw, g_play, g_stream, g_rgi, g_rg, g_size;
 static volatile u32 g_client = 0xffffffffu, g_self, g_answered, g_comm = 0xffffffffu;
 static volatile u32 g_host, g_hosts8200 = 0xffffffffu, g_nav, g_navMsgs, g_copies, g_fb82;
 static volatile u32 g_wantFkt, g_wantHandle, g_result;   /* g_result: 0 waiting, 1 ok, 2 error */
+static volatile u32 g_sizeW, g_sizeH, g_sizeGot;          /* ImageGetSize answer for picture handle 5 */
 static u32 g_recentFkt[32], g_recentH[32], g_recentMs[32], g_recentN;
 
 static const char *opName(u32 op) {
@@ -141,6 +142,9 @@ static void onFb82(const u8 *p, u32 len) {
     if (g_self && src == g_self) return;
     if (g_self && dst == g_self) {                       /* an answer to us */
         if (src != g_host || op == 0xA || op == 0xB) return;
+        if (fkt == 0xC04 && op == 0xD && h == 5 && (n == 6 || n == 7)) {   /* [h][w][h] or [h][01][w][h], u16 big-endian */
+            const u8 *a = d + (n == 7 ? 3 : 2); g_sizeW = be16(a); g_sizeH = be16(a + 2); g_sizeGot = 1;
+        }
         int byHandle = op != 0xF && n >= 2;
         if (fkt == g_wantFkt && (!byHandle || h == g_wantHandle) && g_result == 0)
             g_result = (op == 0xD || op == 0xC) ? 1 : 2;
@@ -223,7 +227,11 @@ static Call cArrow(void) {
     for (u32 i = 0; i < 14; ++i) c.n += putH(c.p + c.n, (u32)(u16)pts[i]);
     return c;
 }
-static int handleOk(u32 h) { return h >= 1 && h <= 6; }
+/* only the active cluster profile's handles (6WA: 1..6) are ever sent to */
+static int handleOk(u32 h) {
+    const RrProfile *p = rr_profile();
+    return h && (h == p->pic_a || h == p->pic_b || h == p->frame || h == p->street || h == p->dist || h == p->unit);
+}
 static int callOk(const Call *c) {                       /* payloadShapeOk + handle allowlist, re-checked before send */
     if (c->n < 2 || !handleOk(be16(c->p))) return 0;
     switch (c->fkt) {
@@ -245,7 +253,7 @@ static int sendCall(const Call *c) {
     if (!callOk(c) || host < 0x0100 || host > 0x0FFF || self < 0x2000 || self > 0x2FFF || g_client == 0xffffffffu) {
         say("[probe] call refused by local checks"); return 0;
     }
-    u8 r[4 + 32 + 256]; u32 i;
+    static u8 r[4 + 32 + sizeof ((Call *)0)->p]; u32 i;      /* up to a 99-point polygon (402 B) */
     for (i = 0; i < sizeof(r); ++i) r[i] = 0;
     u8 *m = r + 4;
     r[0] = (u8)g_client; r[1] = (u8)(g_client >> 8); r[2] = (u8)(g_client >> 16); r[3] = (u8)(g_client >> 24);
@@ -253,7 +261,7 @@ static int sendCall(const Call *c) {
     m[12] = (u8)host; m[13] = (u8)(host >> 8); m[14] = (u8)self; m[15] = (u8)(self >> 8);
     m[16] = 0x82; m[17] = 0x00; m[18] = (u8)c->fkt; m[19] = (u8)(c->fkt >> 8); m[20] = 6;   /* StartResultAck */
     m[24] = (u8)g_tag; m[25] = (u8)(g_tag >> 8); ++g_tag;
-    m[28] = (u8)c->n;
+    m[28] = (u8)c->n; m[29] = (u8)(c->n >> 8);             /* length is u32 LE (onFb82 reads rd32(p+28)) */
     for (i = 0; i < c->n; ++i) m[32 + i] = c->p[i];
     u32 h = be16(c->p), k = g_recentN++ & 31;
     g_recentFkt[k] = c->fkt; g_recentH[k] = h; g_recentMs[k] = nowMs();
@@ -386,6 +394,18 @@ static int read_line(u8 **s, u32 *n) {
 }
 static RrState g_rr;
 
+/* identity for reports: the HU software version and the DSI library's size (tested: NBTevo_Y24073J, 299684 B) */
+static void log_identity(void) {
+    static char b[4096]; Line l; l.n = 0; ls(&l, "[probe] HU software: ");
+    int fd = open("/opt/sys/etc/nbt_version.txt", 0);
+    long r = fd >= 0 ? read(fd, b, 63) : -1; if (fd >= 0) close(fd);
+    if (r > 0) { for (long i = 0; i < r && b[i] != '\n' && b[i] != '\r'; ++i) if (l.n < sizeof l.b - 1) l.b[l.n++] = b[i]; }
+    else ls(&l, "(unknown)");
+    u32 total = 0; fd = open(LIB, 0);
+    if (fd >= 0) { long k; while ((k = read(fd, b, sizeof b)) > 0) total += (u32)k; close(fd); }
+    ls(&l, ", DSI library "); ld(&l, total); ls(&l, " B (tested: NBTevo_Y24073J, 299684 B)"); lend(&l);
+}
+
 int main(int argc, char **argv) {
     g_draw = argc >= 2 && streq(argv[1], "draw");
     g_play = argc >= 2 && streq(argv[1], "play");
@@ -405,6 +425,7 @@ int main(int argc, char **argv) {
         g_play ? "[probe] mode play (HUDTerminal calls from stdin)" :
         g_draw ? "[probe] mode draw" : "[probe] mode watch (receive only: no MOST message is sent)");
 
+    log_identity();
     void *lib = dlopen(LIB, RTLD_NOW);
     if (!lib) { Line l; l.n = 0; ls(&l, "[dsi] dlopen failed: "); ls(&l, dlerror()); lend(&l); quit(1); }
     connCtor = (FnConnCtor)need(lib, "_ZN14CDSIConnectionC1Ev");
@@ -426,6 +447,15 @@ int main(int argc, char **argv) {
     if (!g_conn || !g_cli || !vt) quit(1);
     connCtor(g_conn);
     cliCtor(g_cli, "DSYSMOSTServer", "MOSTSubSystem", 4, 5);
+    /* Self-check before anything is sent: in BMW's library the constructed client must point at its own vtable (Itanium
+     * C++ ABI: address of _ZTV10CDSIClient + 2 words) and the 8 slots we copy must be filled. Another layout = another
+     * software version we were not built against: stop rather than guess. */
+    {   /* verified in the car's library (Y24073J, CDSIClient ctor @0x2c714: str vtable+8 -> [this]; channel @+0x130,
+         * socket @+0x138, mvn -1 -> [this+0x140]): the offsets sendRequest() uses */
+        int ok = *(void **)g_cli == (void *)((char *)vtable + 8) && *(int *)(g_cli + 0x140) == -1;
+        for (u32 i = 0; ok && i < 8; ++i) ok = ((void **)((char *)vtable + 8))[i] != 0;
+        if (!ok) { say("[dsi] UNSUPPORTED HEAD-UNIT SOFTWARE: the DSI client layout differs from the tested one. Nothing was sent. Please report this log."); quit(1); }
+        say("[dsi] self-check ok (CDSIClient layout as tested)"); }
     for (u32 i = 0; i < 8; ++i) vt[i] = ((void **)((char *)vtable + 8))[i];
     vt[3] = (void *)onAttached; vt[4] = (void *)onDetached; vt[7] = (void *)onData;
     *(void ***)g_cli = vt;
@@ -457,15 +487,38 @@ int main(int argc, char **argv) {
     if (g_nav || g_stop) { say("[probe] factory navigation active or stopped: nothing sent"); quit(1); }
 
     /* shared clear batch (used by one-shot and after a stream ends) */
-    Call draw[32], clr[8]; u32 n = 0;
-    clr[n++] = c3(0x204, 1, 0); clr[n++] = c2(0x220, 5); clr[n++] = c2(0x220, 6); clr[n++] = cSwitch(5, 6);
-    clr[n++] = cText(2, ""); clr[n++] = cText(3, ""); clr[n++] = cText(4, ""); clr[n++] = c3(0x204, 2, 0);
+    static Call draw[128], clr[8]; u32 n = 0;              /* Mapbox pictures: <= 2 x 48 polygons + 12 */
+    if (g_rg) {
+        /* Cluster profile before anything is drawn: cluster.conf (tester override), else ImageGetSize on picture handle 5
+         * (read-only). A cluster without that picture (6WB plane, other layouts) is not drawn on: CarPlay is unaffected. */
+        RrProfile prof; static char conf[256];
+        int fd = open("/opt/carplay-6wa/cluster.conf", 0); long cn = fd >= 0 ? read(fd, conf, sizeof conf - 1) : -1;
+        if (fd >= 0) close(fd);
+        if (cn > 0 && rr_profile_parse(conf, (u32)cn, &prof)) say("[probe] profile from /opt/carplay-6wa/cluster.conf");
+        else {
+            Call q = c2(0xC04, 5); g_sizeGot = 0; g_result = 0; sendCall(&q);
+            for (u32 t = 0; t < 20 && !g_sizeGot; ++t) sleepMs(50);
+            Line l; l.n = 0; ls(&l, "[probe] picture buffer 5: "); ld(&l, g_sizeW); ls(&l, " x "); ld(&l, g_sizeH); lend(&l);
+            if (!g_sizeGot || !rr_profile_detect(g_sizeW, g_sizeH, &prof)) {
+                say("[probe] UNSUPPORTED CLUSTER (no 6WA-family picture buffer): nothing is drawn. Please report this log.");
+                quit(0);
+            }
+        }
+        rr_set_profile(&prof);
+        Line l; l.n = 0; ls(&l, "[probe] cluster profile "); ls(&l, prof.name); ls(&l, ": box "); ld(&l, (u32)prof.x0); ls(&l, ",");
+        ld(&l, (u32)prof.y0); ls(&l, "-"); ld(&l, (u32)prof.x1); ls(&l, ","); ld(&l, (u32)prof.y1); lend(&l);
+    }
+    {   const RrProfile *p = rr_profile();
+        clr[n++] = c3(0x204, p->frame, 0); clr[n++] = c2(0x220, p->pic_a); clr[n++] = c2(0x220, p->pic_b);
+        clr[n++] = cSwitch(p->pic_a, p->pic_b); clr[n++] = cText(p->street, ""); clr[n++] = cText(p->dist, "");
+        clr[n++] = cText(p->unit, ""); clr[n++] = c3(0x204, p->street, 0); }
     for (u32 i = 0; i < 8; ++i) if (!callOk(&clr[i])) quit(9);
 
     if (g_rg) {
         /* Poll librghook's state file (it is rewritten, via rename, on every route guidance message). Draw only on a change.
          * The file lives in RAM (/dev/shmem); a missing file = no session yet. Bounded by secs; clears on the way out. */
         const char *path = argc >= 4 ? argv[3] : "/dev/shmem/routeguidance";
+        if (argc >= 5) rr_set_context_colour((int)parseSecs(argv[4], 2));   /* dim-tone colour index (calibration knob) */
         static char cur[4096], prev[4096]; u32 plen = 0, updates = 0, clears = 0, end = nowMs() + secs * 1000u;
         rr_init(&g_rr);
         while (!g_stop && !g_nav && (int)(nowMs() - end) < 0) {
@@ -480,7 +533,7 @@ int main(int argc, char **argv) {
             if (same) continue;
             for (u32 i = 0; i < n; ++i) prev[i] = cur[i];
             plen = n;
-            int clear = 0, nd = rr_state_text(&g_rr, cur, n, draw, 32, &clear);
+            int clear = 0, nd = rr_state_text(&g_rr, cur, n, draw, 128, &clear);
             if (clear) { g_result = 0; if (!sendAll(clr, 8, 0)) break; ++clears; say("[probe] rg: route ended: cleared"); continue; }
             if (nd <= 0) continue;
             int ok = 1; for (int i = 0; i < nd; ++i) if (!callOk(&draw[i])) { ok = 0; break; }

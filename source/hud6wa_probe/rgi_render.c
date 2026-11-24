@@ -1,6 +1,7 @@
 /* rgi_render.c — see rgi_render.h. Freestanding: byte-wise, no libc, no __aeabi_* calls. */
 #include "rgi_render.h"
 #include "glyph_table.h"
+#include "rgi_shape.h"
 
 typedef unsigned char u8; typedef unsigned int u32;
 
@@ -259,35 +260,126 @@ static int num(const char *t, u32 n, const char *key, int *out) {
     for (; i < vn && v[i] >= '0' && v[i] <= '9'; ++i) x = x * 10 + (v[i] - '0');
     *out = neg ? -x : x; return 1;
 }
+/* a signed decimal at *p (advances it); 0 if none */
+static int snum(const char *v, u32 vn, u32 *p, int *out) {
+    u32 i = *p; int neg = 0, x = 0, got = 0;
+    if (i < vn && v[i] == '-') { neg = 1; ++i; }
+    for (; i < vn && v[i] >= '0' && v[i] <= '9'; ++i) { x = x * 10 + (v[i] - '0'); got = 1; }
+    *p = i; *out = neg ? -x : x; return got;
+}
+/* "status/hl/a,b;status/hl/a" (rghook.c publish) -> lanes, left to right */
+static u32 parse_lanes(const char *v, u32 vn, RrLane *L, u32 max) {
+    u32 n = 0, i = 0;
+    while (i < vn && n < max) {
+        RrLane *l = &L[n]; int x; l->na = 0; l->hl = 1000; l->status = 0;
+        if (!snum(v, vn, &i, &x)) break;
+        l->status = (unsigned)x;
+        if (i < vn && v[i] == '/') { ++i; if (snum(v, vn, &i, &x)) l->hl = x; }
+        if (i < vn && v[i] == '/') {
+            ++i;
+            while (l->na < 4 && snum(v, vn, &i, &l->ang[l->na])) { ++l->na; if (i < vn && v[i] == ',') ++i; else break; }
+        }
+        ++n;
+        while (i < vn && v[i] != ';') ++i;
+        if (i < vn) ++i;
+    }
+    return n;
+}
+static RrPoly g_poly[48];
+const RrProfile RR_PROFILE_6WA = { "6WA", BUF_A, BUF_B, FRAME, STREET, DIST, UNIT, RR_BOX_X0, RR_BOX_Y0, RR_BOX_X1, RR_BOX_Y1 };
+static RrProfile g_prof = { "6WA", BUF_A, BUF_B, FRAME, STREET, DIST, UNIT, RR_BOX_X0, RR_BOX_Y0, RR_BOX_X1, RR_BOX_Y1 };
+void rr_set_profile(const RrProfile *p) { g_prof = *p; }
+const RrProfile *rr_profile(void) { return &g_prof; }
+int rr_profile_detect(unsigned w, unsigned h, RrProfile *out) {
+    if (w < 64 || h < 48 || w > 1024 || h > 1024) return 0;        /* no picture buffer 5 (or nonsense): not a 6WA-family cluster */
+    *out = RR_PROFILE_6WA;
+    int side = (int)((w < h ? w : h) * 7u / 10u);                   /* 70 % of the short side, centred: 176 x 126 -> 88 at (44,19) */
+    out->x0 = ((int)w - side) >> 1; out->y0 = ((int)h - side) >> 1; out->x1 = out->x0 + side; out->y1 = out->y0 + side;
+    return 1;
+}
+int rr_profile_parse(const char *t, unsigned n, RrProfile *out) {
+    int v[10]; u32 i = 0, k = 0;
+    while (k < 10) {
+        while (i < n && (t[i] == ' ' || t[i] == '\t')) ++i;
+        if (!snum(t, n, &i, &v[k])) return 0;
+        ++k;
+    }
+    for (k = 0; k < 6; ++k) if (v[k] < 1 || v[k] > 0xFF) return 0;
+    if (v[6] < 0 || v[7] < 0 || v[8] <= v[6] || v[9] <= v[7] || v[8] > 1024 || v[9] > 1024) return 0;
+    out->name = "cluster.conf";
+    out->pic_a = (unsigned)v[0]; out->pic_b = (unsigned)v[1]; out->frame = (unsigned)v[2];
+    out->street = (unsigned)v[3]; out->dist = (unsigned)v[4]; out->unit = (unsigned)v[5];
+    out->x0 = v[6]; out->y0 = v[7]; out->x1 = v[8]; out->y1 = v[9];
+    return 1;
+}
+static int g_ctx = 2;                       /* context-tone colour index: 2 picked by the owner on the 6WA (3 = too dim grey, 5 = red) */
+void rr_set_context_colour(int c) { g_ctx = c; }
+
+/* Mapbox pictures (st1ng's hudshapes via rgi_shape) from librghook's state file. Redraws when the picture or the street
+ * changes, else only the distance text. 3/4 Loading/Locating keep the last picture; any other non-guiding state clears. */
 int rr_state_text(RrState *s, const char *t, u32 n, Call *out, int max, int *clear) {
     *clear = 0;
-    int rs = 0, idx, type = 0, ang = 0, jt = 0, dist;
+    int rs = 0, idx, type = 0, ang = 0, side = 0, jt = 0, dist;
     num(t, n, "route_state", &rs);
-    if (!(rs == 1 || rs == 5 || rs == 6)) {                            /* 3/4 Loading/Locating: keep the last picture */
-        if (rs != 3 && rs != 4 && s->shown >= 0) { *clear = 1; s->shown = -1; s->fresh = 1; s->visible = BUF_B; }
+    if (!(rs == 1 || rs == 5 || rs == 6)) {
+        if (rs != 3 && rs != 4 && s->shown >= 0) { *clear = 1; s->shown = -1; s->fresh = 1; s->visible = g_prof.pic_b; s->sig[0] = 0; }
         return 0;
     }
     if (!num(t, n, "maneuver_index", &idx) || idx < 0) return 0;
-    int has_type = num(t, n, "maneuver_type", &type), has_ang = num(t, n, "maneuver_exit_angle", &ang);
-    num(t, n, "maneuver_junction_type", &jt);
-    RrMan c; u8 *cp = (u8 *)&c; for (u32 i = 0; i < sizeof c; ++i) cp[i] = 0;
-    c.valid = 1;
-    c.glyph = glyph_slot(has_type, type, 1, jt == 1, has_ang, ang, &c.exit_no);
-    const char *rd; u32 rn;
-    if (field(t, n, "maneuver_road", &rd, &rn) && rn) rr_cluster_text((const u8 *)rd, rn, c.street, sizeof c.street);
-    else if (field(t, n, "current_road", &rd, &rn)) rr_cluster_text((const u8 *)rd, rn, c.street, sizeof c.street);
+    num(t, n, "maneuver_type", &type); num(t, n, "maneuver_exit_angle", &ang);
+    num(t, n, "maneuver_driving_side", &side); num(t, n, "maneuver_junction_type", &jt);
+    int jang[8]; u32 nj = 0; const char *v; u32 vn;
+    if (field(t, n, "maneuver_junction_angles", &v, &vn))
+        for (u32 i = 0; nj < 8 && snum(v, vn, &i, &jang[nj]);) { ++nj; if (i < vn && v[i] == ',') ++i; else break; }
+    RrLane lanes[8]; u32 nl = 0;
+    if (field(t, n, "lanes", &v, &vn) && vn) nl = parse_lanes(v, vn, lanes, 8);
+    char street[48]; street[0] = 0;
+    if (field(t, n, "maneuver_road", &v, &vn) && vn) rr_cluster_text((const u8 *)v, vn, street, sizeof street);
+    else if (field(t, n, "current_road", &v, &vn)) rr_cluster_text((const u8 *)v, vn, street, sizeof street);
+    { u32 k = 0; while (street[k]) ++k; if (k > 32) k = 32; while (k && street[k - 1] == ' ') --k; street[k] = 0; } /* 6WA: <= 32 */
     /* parked / before the first update the iPhone sends 0 with no text: show no distance rather than "0 m" */
     const char *dsv; u32 dsn;
     int has_ds = field(t, n, "dist_to_maneuver_string", &dsv, &dsn) && dsn;
     s->dist_m = num(t, n, "dist_to_maneuver", &dist) && (dist > 0 || has_ds) ? dist : -1;
-    int slot = idx % RR_MAXMAN;
-    RrMan *m = &s->man[slot];
-    int same = m->valid && m->glyph == c.glyph && m->exit_no == c.exit_no && seq(m->street, c.street);
-    u8 *mp = (u8 *)m; for (u32 i = 0; i < sizeof c; ++i) mp[i] = cp[i];
-    if (s->shown != slot || !same) return rr_draw(s, slot, out, max);
-    char val[8], unit[4]; rr_distance(s->dist_m, val, unit);         /* same maneuver: distance text only */
-    int k = 0;
-    if (!seq(val, s->sval) && k < max) { c_text(&out[k++], DIST, val); scpy(s->sval, val, sizeof s->sval); }
-    if (!seq(unit, s->sunit) && k < max) { c_text(&out[k++], UNIT, unit); scpy(s->sunit, unit, sizeof s->sunit); }
-    return k;
+    /* signature of everything drawn except the distance */
+    char sig[sizeof s->sig]; u32 k = 0;
+    const char *keys[] = { "maneuver_type", "maneuver_exit_angle", "maneuver_driving_side", "maneuver_junction_type",
+                           "maneuver_junction_angles", "lanes" };
+    for (u32 q = 0; q < 6; ++q) {
+        if (field(t, n, keys[q], &v, &vn)) for (u32 i = 0; i < vn && k + 2 < sizeof sig; ++i) sig[k++] = v[i];
+        if (k + 2 < sizeof sig) sig[k++] = '|';
+    }
+    for (const char *p = street; *p && k + 1 < sizeof sig; ++p) sig[k++] = *p;
+    sig[k] = 0;
+    if (s->shown == idx && seq(sig, s->sig)) {                           /* same picture: distance text only */
+        char val[8], unit[4]; rr_distance(s->dist_m, val, unit);
+        int c = 0;
+        if (!seq(val, s->sval) && c < max) { c_text(&out[c++], g_prof.dist, val); scpy(s->sval, val, sizeof s->sval); }
+        if (!seq(unit, s->sunit) && c < max) { c_text(&out[c++], g_prof.unit, unit); scpy(s->sunit, unit, sizeof s->sunit); }
+        return c;
+    }
+    int np = rr_shape((unsigned)type, ang, (unsigned)side, (unsigned)jt, jang, nj, lanes, nl,
+                      g_prof.x0, g_prof.y0, g_prof.x1, g_prof.y1, g_poly, 48);
+    if (np <= 0 || max < 2 * np + 12) return 0;
+    char val[8], unit[4]; rr_distance(s->dist_m, val, unit);
+    u32 vis = s->visible == g_prof.pic_a ? g_prof.pic_a : g_prof.pic_b, hid = vis == g_prof.pic_b ? g_prof.pic_a : g_prof.pic_b;
+    int c = 0, cur = -1;
+    c_h(&out[c++], REMOVE_ALL, hid);
+    for (int i = 0; i < np; ++i) {
+        int col = g_poly[i].tone ? g_ctx : FILL;
+        if (col != cur) { c_b(c_h(&out[c++], SET_FILL, hid), (u32)col); cur = col; }
+        Call *pc = c_h(&out[c++], ADD_POLY, hid);
+        c_b(pc, (u32)i >> 8); c_b(pc, (u32)i); c_b(pc, 3); c_b(pc, g_poly[i].n);
+        for (u32 j = 0; j < g_poly[i].n; ++j)
+            for (u32 xy = 0; xy < 2; ++xy) { u32 w = (u32)(unsigned short)g_poly[i].p[j][xy]; c_b(pc, w >> 8); c_b(pc, w); }
+    }
+    Call *sw = c_h(&out[c++], SWITCH_VIS, vis); c_b(sw, hid >> 8); c_b(sw, hid);
+    c_h(&out[c++], REMOVE_ALL, vis);
+    if (s->fresh) { c_b(c_h(&out[c++], SET_VIS, g_prof.street), 1); c_b(c_h(&out[c++], SET_VIS, g_prof.dist), 1);
+                    c_b(c_h(&out[c++], SET_VIS, g_prof.unit), 1); }
+    c_text(&out[c++], g_prof.street, street); c_text(&out[c++], g_prof.dist, val); c_text(&out[c++], g_prof.unit, unit);
+    c_b(c_h(&out[c++], SET_VIS, g_prof.frame), 1);
+    s->visible = hid; s->fresh = 0; s->shown = idx;
+    scpy(s->sig, sig, sizeof s->sig); scpy(s->sval, val, sizeof s->sval); scpy(s->sunit, unit, sizeof s->sunit);
+    return c;
 }
